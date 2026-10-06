@@ -37,6 +37,7 @@
 #include <ImagesCPU.h>
 #include <ImagesNPP.h>
 
+#include <math.h>
 #include <string.h>
 #include <fstream>
 #include <iostream>
@@ -90,7 +91,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-            filePath = sdkFindFilePath("Lena.pgm", argv[0]);
+            filePath = sdkFindFilePath("Lena.png", argv[0]);
         }
 
         if (filePath)
@@ -99,7 +100,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-            sFilename = "Lena.pgm";
+            sFilename = "Lena.png";
         }
 
         // if we specify the filename at the command line, then we only test
@@ -156,25 +157,48 @@ int main(int argc, char *argv[])
 
         // create struct with the ROI size
         NppiSize oSrcSize = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
-        NppiPoint oSrcOffset = {0, 0};
-        NppiSize oSizeROI = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
+        NppiRect oSrcROI = {0, 0, oSrcSize.width, oSrcSize.height};
 
-        // Calculate the bounding box of the rotated image
-        NppiRect oBoundingBox;
+        // Calculate the bounding box of the rotated image. NPP rotates about
+        // the origin, so shifting by the box's minimum corner keeps the whole
+        // rotated image inside the destination.
         double angle = 45.0; // Rotation angle in degrees
-        NPP_CHECK_NPP(nppiGetRotateBound(oSrcSize, angle, &oBoundingBox));
+        double aBoundingBox[2][2];
+        NPP_CHECK_NPP(nppiGetRotateBound(oSrcROI, aBoundingBox, angle, 0, 0));
+
+        double shiftX = -aBoundingBox[0][0];
+        double shiftY = -aBoundingBox[0][1];
+        int dstWidth = (int)ceil(aBoundingBox[1][0] - aBoundingBox[0][0]);
+        int dstHeight = (int)ceil(aBoundingBox[1][1] - aBoundingBox[0][1]);
 
         // allocate device image for the rotated image
-        npp::ImageNPP_8u_C1 oDeviceDst(oBoundingBox.width, oBoundingBox.height);
+        npp::ImageNPP_8u_C1 oDeviceDst(dstWidth, dstHeight);
+        NppiRect oDstROI = {0, 0, dstWidth, dstHeight};
 
-        // Set the rotation point (center of the image)
-        NppiPoint oRotationCenter = {(int)(oSrcSize.width / 2), (int)(oSrcSize.height / 2)};
+        // the non-_Ctx NPP entry points were removed in CUDA 13, so describe
+        // the device and the default stream explicitly
+        NppStreamContext nppStreamCtx = {};
+        nppStreamCtx.hStream = 0;
+        checkCudaErrors(cudaGetDevice(&nppStreamCtx.nCudaDeviceId));
+        cudaDeviceProp oDeviceProperties;
+        checkCudaErrors(cudaGetDeviceProperties(&oDeviceProperties, nppStreamCtx.nCudaDeviceId));
+        nppStreamCtx.nMultiProcessorCount = oDeviceProperties.multiProcessorCount;
+        nppStreamCtx.nMaxThreadsPerMultiProcessor = oDeviceProperties.maxThreadsPerMultiProcessor;
+        nppStreamCtx.nMaxThreadsPerBlock = oDeviceProperties.maxThreadsPerBlock;
+        nppStreamCtx.nSharedMemPerBlock = oDeviceProperties.sharedMemPerBlock;
+        nppStreamCtx.nCudaDevAttrComputeCapabilityMajor = oDeviceProperties.major;
+        nppStreamCtx.nCudaDevAttrComputeCapabilityMinor = oDeviceProperties.minor;
+        checkCudaErrors(cudaStreamGetFlags(nppStreamCtx.hStream, &nppStreamCtx.nStreamFlags));
+
+        // clear the destination so the corners outside the rotated image are black
+        NPP_CHECK_NPP(nppiSet_8u_C1R_Ctx(0, oDeviceDst.data(), oDeviceDst.pitch(),
+                                         {dstWidth, dstHeight}, nppStreamCtx));
 
         // run the rotation
-        NPP_CHECK_NPP(nppiRotate_8u_C1R(
-            oDeviceSrc.data(), oSrcSize, oDeviceSrc.pitch(), oSrcOffset,
-            oDeviceDst.data(), oDeviceDst.pitch(), oBoundingBox, angle, oRotationCenter,
-            NPPI_INTER_NN));
+        NPP_CHECK_NPP(nppiRotate_8u_C1R_Ctx(
+            oDeviceSrc.data(), oSrcSize, oDeviceSrc.pitch(), oSrcROI,
+            oDeviceDst.data(), oDeviceDst.pitch(), oDstROI, angle, shiftX, shiftY,
+            NPPI_INTER_NN, nppStreamCtx));
 
         // declare a host image for the result
         npp::ImageCPU_8u_C1 oHostDst(oDeviceDst.size());

@@ -27,29 +27,71 @@
 #
 ################################################################################
 #
-# Makefile project only supported on Mac OS X and Linux Platforms)
+# Builds with nvcc on Linux, and on Windows (GNU make run from Git Bash/MSYS)
+# with the MSVC host compiler located automatically through vswhere.
 #
 ################################################################################
-
-# Define the compiler and flags
-NVCC = /usr/local/cuda/bin/nvcc
-CXX = g++
-CXXFLAGS = -std=c++11 -I/usr/local/cuda/include -Iinclude
-LDFLAGS = -L/usr/local/cuda/lib64 -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc
 
 # Define directories
 SRC_DIR = src
 BIN_DIR = bin
 DATA_DIR = data
 LIB_DIR = lib
+INCLUDE_DIR = include
+
+# GPU architecture to generate code for (86 = RTX 30xx / Ampere)
+SM ?= 86
+
+ifeq ($(OS),Windows_NT)
+    # use Git for Windows' sh so the recipes also work when make is started
+    # from PowerShell or cmd
+    SHELL := C:/Program Files/Git/usr/bin/sh.exe
+    export PATH := C:/Program Files/Git/usr/bin;$(PATH)
+    EXE = .exe
+    NVCC ?= nvcc
+    # nvcc needs cl.exe; find the newest MSVC toolset unless CCBIN is given
+    ifeq ($(origin CCBIN),undefined)
+        VSWHERE = C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe
+        VS_PATH := $(subst \,/,$(shell "$(VSWHERE)" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath))
+        MSVC_VER := $(strip $(shell cat "$(VS_PATH)/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"))
+        CCBIN := $(VS_PATH)/VC/Tools/MSVC/$(MSVC_VER)/bin/Hostx64/x64
+    endif
+else
+    EXE =
+    CUDA_PATH ?= /usr/local/cuda
+    NVCC ?= $(or $(shell command -v nvcc),$(CUDA_PATH)/bin/nvcc)
+endif
+
+# Define the compiler and flags
+NVCCFLAGS = -std=c++17 -arch=sm_$(SM) -I$(INCLUDE_DIR)
+ifneq ($(CCBIN),)
+    NVCCFLAGS += -ccbin "$(CCBIN)"
+endif
+LDFLAGS = -lcudart -lnppc -lnppisu -lnppig -lnppidei -lnppicc -lnppif
+
+HEADERS = $(wildcard $(INCLUDE_DIR)/*.h)
+ROTATE = $(BIN_DIR)/imageRotationNPP$(EXE)
+COLOUR = $(BIN_DIR)/imageColourNPP$(EXE)
+
+INPUT ?= $(DATA_DIR)/Lena.png
+
+.PHONY: all run run-colour clean help
 
 # Define the default rule
-all: $(TARGET)
+all: $(ROTATE) $(COLOUR)
 
-# Rule for building the target executable
-$(TARGET): $(SRC)
+# Each program is a single source file: bin/<name> from src/<name>.cpp
+$(BIN_DIR)/%$(EXE): $(SRC_DIR)/%.cpp $(HEADERS)
 	mkdir -p $(BIN_DIR)
-	$(NVCC) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+	"$(NVCC)" $(NVCCFLAGS) $< -o $@ $(LDFLAGS)
+
+# Build if needed, then rotate INPUT
+run: $(ROTATE)
+	./$(ROTATE) --input=$(INPUT) --output=$(basename $(INPUT))_rotate.pgm
+
+# Build if needed, then keep INPUT's most common colour and blur the rest
+run-colour: $(COLOUR)
+	./$(COLOUR) --input=$(INPUT) --output=$(basename $(INPUT))_colour.jpg
 
 # Clean up
 clean:
@@ -59,5 +101,8 @@ clean:
 help:
 	@echo "Available make commands:"
 	@echo "  make        - Build the project."
+	@echo "  make run    - Build, then rotate INPUT (default $(INPUT))."
+	@echo "  make run-colour - Build, then colour-splash INPUT."
 	@echo "  make clean  - Clean up the build files."
 	@echo "  make help   - Display this help message."
+	@echo "Variables: SM=86 (GPU arch), CCBIN=<dir of cl.exe> (Windows), CUDA_PATH (Linux)."
