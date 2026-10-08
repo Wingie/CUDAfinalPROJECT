@@ -16,24 +16,37 @@ a soft round "splat" and you can rotate and zoom with the mouse.
 ## How it works
 
 1. **Load:** read the photo with OpenCV (`imread`, BGR).
-2. **Estimate depth on the GPU:** run the [MiDaS](https://github.com/isl-org/MiDaS) v2.1
-   small model (`midas.onnx`) with ONNX Runtime and its CUDA execution provider
-   (cuDNN). The photo is resized to 256x256 and normalised with the ImageNet mean and
-   standard deviation. MiDaS returns relative inverse depth (disparity), which is
-   resized back to the photo's size. There is no CPU fallback: if CUDA can't be used,
-   the program stops with an error.
-3. **Turn disparity into depth:** normalise the disparity to 0..1 and invert it, which
-   gives a depth between about 0.67 (near) and 2 (far). That range fits the viewer's camera.
+2. **Estimate depth on the GPU:** run [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)
+   Small (Apache-2.0, [ONNX export](https://huggingface.co/onnx-community/depth-anything-v2-small))
+   with ONNX Runtime and its CUDA execution provider (cuDNN). The photo is resized so its
+   short side is 518 pixels, keeping the aspect ratio (784x518 for a 3:2 photo), and
+   normalised with the ImageNet mean and standard deviation. The model returns relative
+   inverse depth (disparity), which is resized back to the photo's size. The older
+   [MiDaS](https://github.com/isl-org/MiDaS) v2.1 small model (256x256) still works with
+   `MODEL=midas.onnx`, but its depth edges are much blurrier. There is no CPU fallback:
+   if CUDA can't be used, the program stops with an error.
+3. **Turn disparity into depth:** the disparity has an unknown scale and shift, so real
+   distances can't be recovered from one photo. It is normalised to 0..1 and mapped onto
+   inverse depth, so depth runs from 1 (nearest) to `DEPTH_RANGE` (farthest, default 10).
+   A small range squashes the scene into flat layers (an "embossed" look); a larger range
+   pushes the background further back.
 4. **Upload:** copy the colour image and the depth map to the GPU.
-5. **Back-project (custom CUDA kernel `generatePointCloud`):** one thread per output
-   point. Each thread applies pinhole-camera maths
-   (`x = (u - w/2) * z / f`, `y = (v - h/2) * z / f`, with `f = 0.8 * width`) and
-   stores the position and the RGB colour. Only every `stride`-th pixel is used, so the
-   cloud stays under 500,000 points and loads in a browser (a 24 MP photo would
-   otherwise give 24 million points).
-6. **Save:** download the points and write an ASCII PLY file.
+5. **Back-project and remove edge points (custom CUDA kernel `generatePointCloud`):** one
+   thread per sampled pixel. Each thread applies pinhole-camera maths
+   (`x = (u - w/2) * z / f`, `y = (v - h/2) * z / f`, with `f = 0.8 * width`) and stores
+   the position and the RGB colour. Only every `stride`-th pixel is used, so the cloud
+   stays under 500,000 points and loads in a browser (a 24 MP photo would otherwise give
+   24 million points).
 
-The program prints the depth-model timings, the image size, the stride and the number of points.
+   The depth model blurs depth across object outlines. Without a fix, those pixels become
+   a "curtain" of points floating between the subject and the background. So each thread
+   also compares its depth with the 4 neighbours one depth-model pixel away. If the
+   relative difference is larger than `EDGE` (default 0.1), the point is dropped. Kept
+   points are packed together with an `atomicAdd` counter.
+6. **Save:** download the kept points and write an ASCII PLY file.
+
+The program prints the depth-model input size and timings, the image size, the stride,
+and how many points were kept or dropped on depth edges.
 
 ## Requirements
 
@@ -52,37 +65,51 @@ the libraries through its RPATH.
 
 ## Running
 
-From a WSL shell in the project folder (for example `/mnt/d/System32/cuda/CUDAfinalPROJECT`):
+Run these from PowerShell / cmd / Git Bash on Windows, or from a WSL shell in the project folder. On Windows, `make` forwards the splat targets (`ort`, `model`, `splat`, `run-splat`, `server`) to WSL (`WSL_DISTRO=Ubuntu`), passing on your variables. Windows paths such as `INPUT=D:/images/photo.jpg` are converted to `/mnt/d/...`.
 
 ```sh
-make model                                  # download the MiDaS model to midas.onnx (once, 64 MB)
+make model                                  # download Depth Anything V2 Small (once, 99 MB)
 make run-splat INPUT=data/Lena.png          # build bin/splat and write data/ply/Lena.ply
 make run-splat INPUT=photo.jpg PLY=data/ply/other.ply  # choose the output file
-make serve                                  # start a web server on port 8080
+make run-splat INPUT=photo.jpg DEPTH_RANGE=5 EDGE=0.05  # flatter scene, stricter edge filter
+make run-splat INPUT=photo.jpg MODEL=midas.onnx         # compare with MiDaS (downloaded on first use)
+make server                                 # start the web server on port 8080 (alias: make serve; Ctrl+C stops it)
 ```
+
+| Variable      | Default                         | Meaning                                                         |
+|---------------|---------------------------------|-----------------------------------------------------------------|
+| `MODEL`       | `depth_anything_v2_small.onnx`  | Depth model (`midas.onnx` also works)                           |
+| `DEPTH_RANGE` | `10`                            | Far/near ratio of the scene; larger = more depth                |
+| `EDGE`        | `0.1`                           | Relative depth jump at which a point is dropped as an edge point; `0` keeps all |
+| `MAX_POINTS`  | `500000`                        | Upper limit on the number of points                             |
 
 Then open **http://localhost:8080/src/index.html**. Browsers won't load a local
 file from a page opened by double-clicking, so the page has to come from the server.
 The viewer lists every `.ply` in `data/ply/`: press **Space** for the next point cloud and **Shift+Space** for the previous one. The file name is shown at the top left. To start at a particular file, add
 `?ply=`, for example `http://localhost:8080/src/index.html?ply=IMG_1515.ply`.
+Each cloud opens from where the photo was taken, with the photo's field of view, so it
+first looks like the photo; drag to orbit around it. The splats have a fixed size on
+screen, matched to the point spacing, so far-away points don't shrink to nothing.
 
 You can also run the program directly:
 
 ```sh
-./bin/splat <image> [output.ply] [model.onnx] [max_points]   # defaults: output.ply midas.onnx 500000
+./bin/splat <image> [output.ply] [model.onnx] [max_points] [depth_range] [edge_threshold]
+# defaults: output.ply depth_anything_v2_small.onnx 500000 10 0.1
 ```
 
 Example output for a 24-megapixel Canon EOS R8 photo on the RTX 3090:
 
 ```
-MiDaS: ONNX Runtime 1.30.0 on CUDA
-MiDaS inference (first run): 1124.06 ms
-MiDaS inference (warm): 5.79425 ms
-Image 6000x4000, stride 7, 490776 points
+Depth model: depth_anything_v2_small.onnx, ONNX Runtime 1.30.0 on CUDA, input 784x518
+Depth inference (first run): 6108.09 ms
+Depth inference (warm): 116.703 ms
+Image 6000x4000, stride 7, depth range 1..10, kept 481569 of 490776 points (9207 on depth edges)
 Saving 3D Splat to data/ply/IMG_1515.ply...
 ```
 
-The first inference includes cuDNN start-up; after that the depth model takes about 6 ms.
+The first inference includes cuDNN start-up; after that Depth Anything V2 Small takes
+about 120 ms (MiDaS small about 7 ms, but with much blurrier depth).
 
 # ImageColourNPP: colour splash
 

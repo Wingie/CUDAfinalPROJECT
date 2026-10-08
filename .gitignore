@@ -6,10 +6,12 @@
 *.fatbin
 data/charlize/source
 data/*.zip
-midas.onnx
+*.onnx
 midas.onnx.part
 data/ply/
 bin/splat
 lib/ort
 lib/ort.tmp
 *.onnx
+depth_anything_v2_small.onnx
+*.onnx.part

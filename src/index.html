@@ -43,8 +43,11 @@
         // data/ply/ are listed (from the dev server's directory listing);
         // Space shows the next one, Shift+Space the previous one.
         const PLY_DIR = '../data/ply/';
+        // Splat size is in screen pixels (set per cloud in fitCamera): with world-sized
+        // splats the far points would shrink to nothing, since depth runs from 1 to 10
         const material = new THREE.PointsMaterial({
-            size: 0.02,
+            size: 3,
+            sizeAttenuation: false,
             vertexColors: true,
             map: texture,
             transparent: true,
@@ -57,6 +60,33 @@
         let pointCloud = null;
         let loadId = 0;
 
+        // Put the camera where the photo was taken (the origin of the un-centred cloud),
+        // with the photo's field of view, so the first view matches the photo. Then
+        // size the splats (in screen pixels) to the spacing between neighbouring points.
+        function fitCamera(geometry) {
+            const pos = geometry.attributes.position;
+            geometry.computeBoundingBox();
+            const c = geometry.boundingBox.getCenter(new THREE.Vector3());
+            let slopeX = 0, slopeY = 0;
+            for (let i = 0; i < pos.count; i += 7) {
+                const z = pos.getZ(i);
+                slopeX = Math.max(slopeX, Math.abs(pos.getX(i)) / z);
+                slopeY = Math.max(slopeY, Math.abs(pos.getY(i)) / z);
+            }
+            camera.fov = 2 * Math.atan(slopeY) * 180 / Math.PI;
+            camera.near = 0.01;
+            camera.far = 100 * geometry.boundingBox.max.z;
+            camera.updateProjectionMatrix();
+            // centred, then rotated by PI around x: (x, y, z) -> (x, -y, -z)
+            // and look straight along the photo's axis (-z), orbiting around the cloud's middle depth
+            camera.position.set(-c.x, c.y, c.z);
+            controls.target.set(-c.x, c.y, 0);
+            controls.update();
+            // the points form a grid with the photo's aspect ratio (slopeX / slopeY)
+            const rows = Math.sqrt(pos.count * slopeY / slopeX);
+            material.size = Math.max(1.5, 2 * window.innerHeight / rows);
+        }
+
         function show(index) {
             current = (index + files.length) % files.length;
             const name = files[current];
@@ -68,6 +98,7 @@
                     scene.remove(pointCloud);
                     pointCloud.geometry.dispose();
                 }
+                fitCamera(geometry);
                 geometry.center();  // orbit around the middle of the cloud
                 pointCloud = new THREE.Points(geometry, material);
                 // Center and rotate the model to look correct
@@ -79,7 +110,9 @@
             });
         }
 
-        fetch(PLY_DIR)
+        if (location.protocol === 'file:') {
+            label.textContent = 'Opened from disk: browsers block loading the .ply files. Run "make server" and open http://localhost:8080/src/index.html';
+        } else fetch(PLY_DIR)
             .then(r => r.text())
             .then(html => {
                 const links = new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a');

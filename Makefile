@@ -85,12 +85,31 @@ ORT_DIR = $(LIB_DIR)/ort
 ORT_LIB = $(ORT_DIR)/lib/libonnxruntime.so
 CUDA12_WHEELS = nvidia-cudnn-cu12==9.* nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cufft-cu12 \
                 nvidia-curand-cu12 nvidia-cuda-nvrtc-cu12
+# Depth models (relative inverse depth, ONNX). Depth Anything V2 Small (Apache-2.0) is the
+# default: much sharper edges than MiDaS v2.1 small, which is kept for comparison (MODEL=midas.onnx).
+DA2_URL = https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx
+DA2_MODEL = depth_anything_v2_small.onnx
 MIDAS_URL = https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx
-MIDAS_MODEL ?= midas.onnx
+MIDAS_MODEL = midas.onnx
+MODEL ?= $(DA2_MODEL)
+MAX_POINTS ?= 500000
+# far/near ratio of the generated scene, and the relative depth jump at which a point counts
+# as sitting on an object edge and is dropped (0 = keep all)
+DEPTH_RANGE ?= 10
+EDGE ?= 0.1
 PLY ?= $(DATA_DIR)/ply/$(notdir $(basename $(INPUT))).ply
 PORT ?= 8080
+# On Windows the splat targets are forwarded to this WSL distro
+WSL_DISTRO ?= Ubuntu
 
-.PHONY: all run run-colour splat ort ort-links model run-splat serve clean help
+# A Windows path forwarded from PowerShell (INPUT=D:/images/x.jpg) becomes /mnt/d/images/x.jpg
+ifneq ($(OS),Windows_NT)
+ifneq ($(findstring :,$(INPUT)),)
+override INPUT := $(shell wslpath -u '$(INPUT)')
+endif
+endif
+
+.PHONY: all run run-colour splat ort ort-links model run-splat serve server clean help
 
 # Define the default rule
 all: $(ROTATE) $(COLOUR)
@@ -107,6 +126,17 @@ run: $(ROTATE)
 # Build if needed, then keep INPUT's most common colour and blur the rest
 run-colour: $(COLOUR)
 	./$(COLOUR) --input=$(INPUT) --output=$(basename $(INPUT))_colour.jpg
+
+ifeq ($(OS),Windows_NT)
+
+# splat needs Linux (OpenCV, ONNX Runtime GPU), so on Windows these targets rerun
+# make inside WSL in the same folder, passing on command-line variables (INPUT=..., PORT=...)
+WSL_DIR := $(shell echo "$(CURDIR)" | sed -E 's|^([A-Za-z]):|/mnt/\L\1|; s|^/([a-z])/|/mnt/\1/|')
+
+splat ort ort-links model run-splat serve server:
+	MSYS_NO_PATHCONV=1 wsl.exe -d $(WSL_DISTRO) --cd "$(WSL_DIR)" -- make $@ $(MAKEOVERRIDES)
+
+else
 
 splat: $(SPLAT)
 
@@ -135,22 +165,30 @@ ort-links:
 	cd $(ORT_DIR)/lib && for f in libcu*.so.* libnv*.so.*; do \
 	    [ -e "$${f%%.so.*}.so" ] || ln -s "$$f" "$${f%%.so.*}.so"; done
 
-# Download the MiDaS depth model (once); .part keeps a failed download from looking finished
-model: $(MIDAS_MODEL)
+# Download the depth models (once); .part keeps a failed download from looking finished
+model: $(MODEL)
+
+$(DA2_MODEL):
+	curl -L --fail -o $@.part $(DA2_URL)
+	mv $@.part $@
 
 $(MIDAS_MODEL):
 	curl -L --fail -o $@.part $(MIDAS_URL)
 	mv $@.part $@
 
 # Build and download if needed, then turn INPUT into PLY (default data/ply/<input name>.ply)
-run-splat: $(SPLAT) $(MIDAS_MODEL)
+run-splat: $(SPLAT) $(MODEL)
 	mkdir -p $(dir $(PLY))
-	./$(SPLAT) $(INPUT) $(PLY) $(MIDAS_MODEL)
+	./$(SPLAT) $(INPUT) $(PLY) $(MODEL) $(MAX_POINTS) $(DEPTH_RANGE) $(EDGE)
 
 # View the point clouds: serves the repo root so src/index.html can list data/ply/ (Space = next)
 serve:
-	@echo "Open http://localhost:$(PORT)/src/index.html"
+	@echo "Open http://localhost:$(PORT)/src/index.html  (Ctrl+C stops the server)"
 	python3 -m http.server $(PORT)
+
+server: serve
+
+endif
 
 # Clean up
 clean:
@@ -162,10 +200,12 @@ help:
 	@echo "  make        - Build the project."
 	@echo "  make run    - Build, then rotate INPUT (default $(INPUT))."
 	@echo "  make run-colour - Build, then colour-splash INPUT."
-	@echo "  make ort    - (Linux/WSL) Download ONNX Runtime GPU + CUDA 12/cuDNN 9 libs to $(ORT_DIR)."
-	@echo "  make model  - Download the MiDaS depth model to $(MIDAS_MODEL)."
-	@echo "  make run-splat - (Linux/WSL) Build splat, then turn INPUT into $(PLY)."
-	@echo "  make serve  - View the point cloud at http://localhost:$(PORT)/src/index.html"
+	@echo "Point clouds (run in WSL $(WSL_DISTRO); from Windows these are forwarded to WSL automatically):"
+	@echo "  make ort    - Download ONNX Runtime GPU + CUDA 12/cuDNN 9 libs to $(ORT_DIR)."
+	@echo "  make model  - Download the depth model MODEL (default $(DA2_MODEL))."
+	@echo "  make run-splat INPUT=<photo> - Build splat, then turn INPUT into data/ply/<name>.ply."
+	@echo "                 Also MODEL, DEPTH_RANGE, EDGE, MAX_POINTS, PLY."
+	@echo "  make server - View the point clouds at http://localhost:$(PORT)/src/index.html (alias: serve)"
 	@echo "  make clean  - Clean up the build files."
 	@echo "  make help   - Display this help message."
 	@echo "Variables: SM=86 (GPU arch), CCBIN=<dir of cl.exe> (Windows), CUDA_PATH (Linux)."
