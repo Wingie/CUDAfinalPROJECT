@@ -2,18 +2,21 @@
 
 Two GPU image programs built with CUDA on an RTX 3090:
 
-1. **[Splat](#splat-2d-photo-to-3d-point-cloud)**, the final course project: turns a single 2D photo into a 3D point cloud
-   ("splat") that you can spin around in the browser.
+1. **[Splat](#splat-2d-photo-to-3d-gaussian-splats)**, the final course project: turns a single 2D photo into 3D Gaussian splats
+   that you can spin around in the browser, rendered live by a CUDA web server.
 2. **[ImageColourNPP](#imagecolournpp-colour-splash)**: the previous final course projet "colour splash" filter built on NPP (NVIDIA Performance Primitives).
 
-# Splat: 2D photo to 3D point cloud
+# Splat: 2D photo to 3D Gaussian splats
 
-`splat` estimates how far away every pixel is, then uses a custom CUDA kernel to place
-each pixel in 3D space. Both steps run on the GPU. The result is saved as a PLY point
-cloud and shown in a Three.js viewer (`src/index.html`), where every point is drawn as
-a soft round "splat" and you can rotate and zoom with the mouse.
+`splat` estimates how far away every pixel is, then uses a custom CUDA kernel to turn
+each pixel into a small 3D Gaussian lying on the surface it belongs to. `splat_server`
+renders those Gaussians with CUDA and serves them to the browser, where you can orbit
+around the scene with the mouse. Everything runs on the GPU: the depth model, making the
+Gaussians, rasterising them, and encoding the frames as JPEG.
 
 ## How it works
+
+### Making the Gaussians (`src/splat.cu`)
 
 1. **Load:** read the photo with OpenCV (`imread`, BGR).
 2. **Estimate depth on the GPU:** run [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)
@@ -31,27 +34,72 @@ a soft round "splat" and you can rotate and zoom with the mouse.
    A small range squashes the scene into flat layers (an "embossed" look); a larger range
    pushes the background further back.
 4. **Upload:** copy the colour image and the depth map to the GPU.
-5. **Back-project and remove edge points (custom CUDA kernel `generatePointCloud`):** one
-   thread per sampled pixel. Each thread applies pinhole-camera maths
-   (`x = (u - w/2) * z / f`, `y = (v - h/2) * z / f`, with `f = 0.8 * width`) and stores
-   the position and the RGB colour. Only every `stride`-th pixel is used, so the cloud
-   stays under 500,000 points and loads in a browser (a 24 MP photo would otherwise give
-   24 million points).
-
-   The depth model blurs depth across object outlines. Without a fix, those pixels become
-   a "curtain" of points floating between the subject and the background. So each thread
-   also compares its depth with the 4 neighbours one depth-model pixel away. If the
-   relative difference is larger than `EDGE` (default 0.1), the point is dropped. Kept
-   points are packed together with an `atomicAdd` counter.
-6. **Save:** download the kept points and write an ASCII PLY file.
+5. **Make the Gaussians (custom CUDA kernel `generateGaussians`):** one thread per sampled
+   pixel. Only every `stride`-th pixel is used, so a scene has at most 500,000 Gaussians
+   (a 24 MP photo would otherwise give 24 million).
+   - Pinhole-camera maths puts the pixel in 3D:
+     `x = (u - w/2) * z / f`, `y = (v - h/2) * z / f`, with `f = 0.8 * width`.
+   - The neighbouring samples to the left/right and above/below give two tangent vectors
+     of the surface; their cross product is the normal. The Gaussian becomes a flat disc
+     in that plane (rotation stored as a quaternion), sized to 0.6x the distance to its
+     neighbours so the discs overlap without gaps, and limited to 8:1 so surfaces seen
+     edge-on don't turn into needles.
+   - The depth model blurs depth across object outlines. Without a fix, those pixels
+     become a "curtain" floating between the subject and the background. So each thread
+     compares its depth with the 4 neighbours one depth-model pixel away; if the relative
+     difference is larger than `EDGE` (default 0.1), the pixel is pushed back to the
+     background depth (looking up to 3 depth-model pixels away) as a small disc facing
+     the camera. Seen from the photo's viewpoint the outline stays filled; seen from the
+     side nothing hangs in mid-air.
+   - Gaussians are packed together with an `atomicAdd` counter.
+6. **Save:** download the Gaussians and write a binary PLY in the layout used by 3D
+   Gaussian Splatting (position, normal, colour as `f_dc`, opacity, `scale_*`, `rot_*`,
+   plus plain `red green blue`), so other splat viewers can open it too. The photo's
+   field of view is stored in a header comment. See `src/gaussians.h`.
 
 The program prints the depth-model input size and timings, the image size, the stride,
-and how many points were kept or dropped on depth edges.
+and how many Gaussians were made and how many of them were on depth edges.
+
+### Rendering them (`src/splat_server.cu`)
+
+`splat_server` is a small web server and a CUDA rasteriser in one program. The browser
+page (`src/viewer.html`) only shows images: when you move the camera it asks for a new
+frame, which is rendered on the GPU and sent back as a JPEG. The rasteriser follows the
+tile renderer of 3D Gaussian Splatting (Kerbl et al., SIGGRAPH 2023):
+
+1. **`preprocess` kernel:** one thread per Gaussian. Move it into camera space, build its
+   3D covariance from rotation and scale (R S S^T R^T), and project that to a 2D ellipse
+   on the screen (EWA splatting: J W Σ W^T J^T, with J the Jacobian of the perspective
+   projection). Work out the 16x16-pixel tiles the ellipse overlaps (3 standard deviations).
+2. **Scan:** prefix sum of the tile counts with CUB, to know where each Gaussian's
+   entries go.
+3. **`duplicateWithKeys` kernel:** one entry per Gaussian per tile it touches, with a
+   64-bit key: tile number in the high 32 bits, depth in the low 32 bits.
+4. **Sort:** CUB radix sort of the keys. Afterwards every tile's Gaussians are together,
+   sorted front to back.
+5. **`identifyTileRanges` kernel:** where each tile's list starts and ends.
+6. **`renderTiles` kernel:** one thread block per tile, one thread per pixel. The tile's
+   Gaussians are loaded into shared memory in batches of 256, and each pixel blends them
+   front to back (C += c * alpha * T, T *= 1 - alpha). A pixel stops once it's opaque,
+   and the block stops when all its pixels are.
+7. **Encode:** nvJPEG compresses the frame straight from GPU memory; only the JPEG is
+   copied back to the CPU.
+
+For 490,000 Gaussians at 1280x720 the rendering takes about 2-3 ms and the JPEG encoding
+under 1 ms on the RTX 3090 (the `X-Render-Ms` and `X-Encode-Ms` response headers, also
+shown in the viewer).
+
+| Request | Answer |
+|---|---|
+| `GET /` | the viewer page |
+| `GET /list` | JSON list of `data/ply/*.ply` |
+| `GET /load?ply=NAME` | loads the file onto the GPU; JSON with the count, field of view and middle depth |
+| `GET /frame?w&h&px&py&pz&tx&ty&tz&fov` | JPEG seen from camera position `p` looking at `t` |
 
 ## Requirements
 
-`splat` is built and run on Linux or in **WSL** (Ubuntu 24.04 on Windows, where WSL
-passes the GPU through):
+Both programs are built and run on Linux or in **WSL** (Ubuntu 24.04 on Windows, where
+WSL passes the GPU through):
 
 ```sh
 sudo apt install nvidia-cuda-toolkit libopencv-dev pkg-config make curl python3-pip
@@ -61,11 +109,12 @@ make ort      # ONNX Runtime GPU 1.30.0 + CUDA 12 / cuDNN 9 runtime libraries in
 OpenCV is used only to load and resize images. `make ort` downloads the prebuilt
 ONNX Runtime GPU release, plus NVIDIA's CUDA 12 and cuDNN 9 libraries from their pip
 wheels, all into `lib/ort/`. Nothing is installed system-wide, and `bin/splat` finds
-the libraries through its RPATH.
+the libraries through its RPATH. `splat_server` only needs the CUDA toolkit (CUB and
+nvJPEG come with it).
 
 ## Running
 
-Run these from PowerShell / cmd / Git Bash on Windows, or from a WSL shell in the project folder. On Windows, `make` forwards the splat targets (`ort`, `model`, `splat`, `run-splat`, `server`) to WSL (`WSL_DISTRO=Ubuntu`), passing on your variables. Windows paths such as `INPUT=D:/images/photo.jpg` are converted to `/mnt/d/...`.
+Run these from PowerShell / cmd / Git Bash on Windows, or from a WSL shell in the project folder. On Windows, `make` forwards the splat targets (`ort`, `model`, `splat`, `splat-server`, `run-splat`, `servecuda`, `servepy`) to WSL (`WSL_DISTRO=Ubuntu`), passing on your variables. Windows paths such as `INPUT=D:/images/photo.jpg` are converted to `/mnt/d/...`.
 
 ```sh
 make model                                  # download Depth Anything V2 Small (once, 99 MB)
@@ -73,29 +122,36 @@ make run-splat INPUT=data/Lena.png          # build bin/splat and write data/ply
 make run-splat INPUT=photo.jpg PLY=data/ply/other.ply  # choose the output file
 make run-splat INPUT=photo.jpg DEPTH_RANGE=5 EDGE=0.05  # flatter scene, stricter edge filter
 make run-splat INPUT=photo.jpg MODEL=midas.onnx         # compare with MiDaS (downloaded on first use)
-make server                                 # start the web server on port 8080 (alias: make serve; Ctrl+C stops it)
+make servecuda                              # CUDA renderer + web server on port 8080 (alias: make server)
+make servepy                                # the older three.js point viewer, served by python
 ```
 
 | Variable      | Default                         | Meaning                                                         |
 |---------------|---------------------------------|-----------------------------------------------------------------|
 | `MODEL`       | `depth_anything_v2_small.onnx`  | Depth model (`midas.onnx` also works)                           |
 | `DEPTH_RANGE` | `10`                            | Far/near ratio of the scene; larger = more depth                |
-| `EDGE`        | `0.1`                           | Relative depth jump at which a point is dropped as an edge point; `0` keeps all |
-| `MAX_POINTS`  | `500000`                        | Upper limit on the number of points                             |
+| `EDGE`        | `0.1`                           | Relative depth jump at which a pixel counts as an edge and is moved to the background; `0` turns it off |
+| `MAX_POINTS`  | `500000`                        | Upper limit on the number of Gaussians                          |
+| `PORT`        | `8080`                          | Port of `servecuda` / `servepy`                                 |
 
-Then open **http://localhost:8080/src/index.html**. Browsers won't load a local
-file from a page opened by double-clicking, so the page has to come from the server.
-The viewer lists every `.ply` in `data/ply/`: press **Space** for the next point cloud and **Shift+Space** for the previous one. The file name is shown at the top left. To start at a particular file, add
-`?ply=`, for example `http://localhost:8080/src/index.html?ply=IMG_1515.ply`.
-Each cloud opens from where the photo was taken, with the photo's field of view, so it
-first looks like the photo; drag to orbit around it. The splats have a fixed size on
-screen, matched to the point spacing, so far-away points don't shrink to nothing.
+After `make servecuda`, open **http://localhost:8080/**. Each scene opens from where the
+photo was taken, with the photo's field of view, so it first looks like the photo.
 
-You can also run the program directly:
+- **Left drag:** orbit, **right drag:** pan, **wheel:** zoom, **R:** back to the photo view
+- **Space / Shift+Space:** next / previous file in `data/ply/`; `?ply=NAME.ply` picks the first one
+- The label shows the file, the number of Gaussians, the CUDA render and JPEG times, and the frame rate.
+
+`make servepy` serves the older three.js viewer at http://localhost:8080/src/index.html,
+which draws the same files as plain points (it reads their `red green blue`).
+Browsers block pages opened straight from disk (`file://`) from loading the files, so
+both viewers have to be opened through their server.
+
+You can also run the programs directly:
 
 ```sh
 ./bin/splat <image> [output.ply] [model.onnx] [max_points] [depth_range] [edge_threshold]
 # defaults: output.ply depth_anything_v2_small.onnx 500000 10 0.1
+./bin/splat_server [port] [ply_dir]          # defaults: 8080 data/ply
 ```
 
 Example output for a 24-megapixel Canon EOS R8 photo on the RTX 3090:
@@ -104,12 +160,25 @@ Example output for a 24-megapixel Canon EOS R8 photo on the RTX 3090:
 Depth model: depth_anything_v2_small.onnx, ONNX Runtime 1.30.0 on CUDA, input 784x518
 Depth inference (first run): 6108.09 ms
 Depth inference (warm): 116.703 ms
-Image 6000x4000, stride 7, depth range 1..10, kept 481569 of 490776 points (9207 on depth edges)
-Saving 3D Splat to data/ply/IMG_1515.ply...
+Image 6000x4000, stride 7, depth range 1..10, kept 490776 of 490776 points (9209 on depth edges, moved to the background)
+Saving 490776 Gaussians to data/ply/IMG_1515.ply...
 ```
 
 The first inference includes cuDNN start-up; after that Depth Anything V2 Small takes
-about 120 ms (MiDaS small about 7 ms, but with much blurrier depth).
+50-120 ms (MiDaS small about 7 ms, but with much blurrier depth).
+
+### A whole photo library (batch)
+
+`splat_batch.sh` (run in WSL) picks N random photos from every sub-folder of a photo
+library and makes a Gaussian file for each, named `data/ply/<folder>__<photo>.ply`, so
+you can step through them in the viewer with Space:
+
+```sh
+./splat_batch.sh [models_dir] [per_folder] [log_dir]   # defaults: /mnt/d/images/models 10 data/splat_logs
+```
+
+`<log_dir>/summary.csv` has one line per photo (folder, image, size, depth-model time,
+Gaussians, edge points, seconds, status), next to the per-photo logs and `run.log`.
 
 # ImageColourNPP: colour splash
 
@@ -242,10 +311,10 @@ The script exits with a non-zero status if any image fails.
 # Code Organization
 
 ```bin/```
-Compiled executables (`splat` on Linux/WSL, `imageColourNPP`, `imageRotationNPP`), built by `make`.
+Compiled executables (`splat` and `splat_server` on Linux/WSL, `imageColourNPP`, `imageRotationNPP`), built by `make`.
 
 ```data/```
-Sample input (`Lena.png`), example output, and the generated point clouds in `data/ply/` (not committed). `data/charlize/` holds the 100-image colour-splash batch run (results and logs).
+Sample input (`Lena.png`), example output, and the generated Gaussian files in `data/ply/` (not committed). `data/splat_logs/` holds the logs of the photo-library batch run, and `data/charlize/` the 100-image colour-splash batch run (results and logs).
 
 ```include/```
 Headers: NPP C++ image helpers from the CUDA samples (`Image*.h`, `helper_cuda.h`, ...) and the single-header `stb_image` / `stb_image_write` libraries.
@@ -254,13 +323,13 @@ Headers: NPP C++ image helpers from the CUDA samples (`Image*.h`, `helper_cuda.h
 Third-party libraries that are not installed by the system package manager. `make ort` puts ONNX Runtime GPU and the CUDA 12 / cuDNN 9 libraries in `lib/ort/` (not committed).
 
 ```src/```
-`splat.cu` (photo to point cloud), `index.html` (the 3D viewer), `imageColourNPP.cpp` (the colour-splash program) and `imageRotationNPP.cpp` (the rotation sample).
+`splat.cu` (photo to 3D Gaussians), `splat_server.cu` (CUDA Gaussian rasteriser and web server), `gaussians.h` (the Gaussian struct and PLY reading/writing shared by both), `viewer.html` (the page `splat_server` serves), `index.html` (the older three.js point viewer), `imageColourNPP.cpp` (the colour-splash program) and `imageRotationNPP.cpp` (the rotation sample).
 
 ```Makefile```
-Builds the programs on Windows and Linux. Also has the `model`, `run-splat` and `serve` targets for splat, and the `run` / `run-colour` targets for the NPP programs.
+Builds the programs on Windows and Linux. Also has the `ort`, `model`, `run-splat`, `servecuda` and `servepy` targets for splat, and the `run` / `run-colour` targets for the NPP programs.
 
 ```run.sh```
-Colour-splash batch runner described above.
+Colour-splash batch runner described above. `splat_batch.sh` is the batch runner for splat.
 
 ```INSTALL```
 Placeholder for installation notes. The requirements and build steps above cover installation for now.

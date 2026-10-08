@@ -15,3 +15,5 @@ lib/ort.tmp
 *.onnx
 depth_anything_v2_small.onnx
 *.onnx.part
+data/ply
+bin/splat_server

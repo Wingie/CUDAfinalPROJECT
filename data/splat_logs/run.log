@@ -1,0 +1,50 @@
+=== splat batch run ===
+date:   Thu Oct  8 12:38:40 CEST 2026
+input:  /mnt/d/images/models (10 random photos per folder)
+model:  depth_anything_v2_small.onnx  depth_range=10  edge=0.1  max_points=500000
+gpu:    NVIDIA GeForce RTX 3090, 616.92
+
+[  1] AIRPLANE WRECK         10-IMG_5061    2048x1365  49.3385 ms  kept 310765 edges 8044   3.9s  OK
+[  2] AIRPLANE WRECK         27-IMG_5042    2048x1365  49.3429 ms  kept 310765 edges 7643   3.5s  OK
+[  3] AIRPLANE WRECK         17-IMG_5053    1365x2048  56.4502 ms  kept 310765 edges 4537   3.7s  OK
+[  4] AIRPLANE WRECK         13-IMG_5058    2048x1365  61.0784 ms  kept 310765 edges 5009   3.7s  OK
+[  5] AIRPLANE WRECK         28-IMG_5041    2048x1365  49.6592 ms  kept 310765 edges 5124   3.6s  OK
+[  6] AIRPLANE WRECK         16-IMG_5054    1365x2048  50.5478 ms  kept 310765 edges 4079   3.4s  OK
+[  7] AIRPLANE WRECK         12-IMG_5059    2048x1365  63.938 ms  kept 310765 edges 5412   3.6s  OK
+[  8] AIRPLANE WRECK         26-IMG_5043    2048x1365  62.4401 ms  kept 310765 edges 10900   3.8s  OK
+[  9] AIRPLANE WRECK         1-IMG_5073     2048x1365  59.7267 ms  kept 310765 edges 10568   3.6s  OK
+[ 10] AIRPLANE WRECK         21-IMG_5048    2048x1365  48.9572 ms  kept 310765 edges 5130   4.5s  OK
+[ 11] ERICA                  35-IMG_6307    2048x1365  56.177 ms  kept 310765 edges 3914   3.6s  OK
+[ 12] ERICA                  152-IMG_6166   1365x2048  57.686 ms  kept 310765 edges 8917   3.7s  OK
+[ 13] ERICA                  144-IMG_6174   1365x2048  49.5542 ms  kept 310765 edges 7524   3.9s  OK
+[ 14] ERICA                  115-IMG_6217   1365x2048  56.8376 ms  kept 310765 edges 3   3.6s  OK
+[ 15] ERICA                  127-IMG_6200   2048x1365  61.129 ms  kept 310765 edges 6287   3.7s  OK
+[ 16] ERICA                  137-IMG_6189   1365x2048   58.78 ms  kept 310765 edges 7797   4.0s  OK
+[ 17] ERICA                  165-IMG_6149   1365x2048  55.3841 ms  kept 310765 edges 7554   3.7s  OK
+[ 18] ERICA                  107-IMG_6226   1365x2048  60.875 ms  kept 310765 edges 7674   3.6s  OK
+[ 19] ERICA                  18-IMG_6327    1365x2048  35.9371 ms  kept 310765 edges 5205   3.6s  OK
+[ 20] ERICA                  10-IMG_6335    2048x1365  57.0185 ms  kept 310765 edges 5444   3.6s  OK
+[ 21] HU                     11-IMG_6833    2048x1365  57.6112 ms  kept 310765 edges 10923   3.8s  OK
+[ 22] HU                     185-IMG_6656   1365x2048  56.4893 ms  kept 310765 edges 8053   3.8s  OK
+[ 23] HU                     67-IMG_6777    1365x2048  68.4757 ms  kept 310765 edges 17857   3.9s  OK
+[ 24] HU                     254-IMG_6587   1365x2048  59.0611 ms  kept 310765 edges 7500   3.5s  OK
+[ 25] HU                     60-IMG_6784    1365x2048  55.2575 ms  kept 310765 edges 12920   3.7s  OK
+[ 26] HU                     143-IMG_6698   1365x2048  50.1052 ms  kept 310765 edges 5217   3.7s  OK
+[ 27] HU                     40-IMG_6804    1365x2048  51.2216 ms  kept 310765 edges 15627   4.2s  OK
+[ 28] HU                     147-IMG_6694   1365x2048  51.7564 ms  kept 310765 edges 4619   4.0s  OK
+[ 29] HU                     88-IMG_6756    1365x2048  51.3807 ms  kept 310765 edges 4973   3.8s  OK
+[ 30] HU                     257-IMG_6584   1365x2048  51.2931 ms  kept 310765 edges 9457   4.0s  OK
+[ 31] LARI                   29-IMG_5521    1365x2048  51.9487 ms  kept 310765 edges 4361   4.3s  OK
+[ 32] LARI                   31-IMG_5519    1365x2048  58.5506 ms  kept 310765 edges 6517   4.1s  OK
+[ 33] LARI                   55-IMG_5495    2048x1365  158.283 ms  kept 310765 edges 7890   4.1s  OK
+[ 34] LARI                   44-IMG_5506    1365x2048  56120.8 ms  kept 310765 edges 6978  61.3s  OK
+[ 35] LARI                   53-IMG_5497    1365x2048  125.902 ms  kept 310765 edges 6684   3.9s  OK
+[ 36] LARI                   30-IMG_5520    1365x2048  55.7172 ms  kept 310765 edges 4499   3.9s  OK
+[ 37] LARI                   36-IMG_5514    1365x2048  17390.4 ms  kept 310765 edges 6597  21.5s  OK
+[ 38] LARI                   47-IMG_5503    1365x2048  89.5772 ms  kept 310765 edges 6350   4.0s  OK
+[ 39] LARI                   32-IMG_5518    1365x2048  19888.2 ms  kept 310765 edges 6012  23.9s  OK
+[ 40] LARI                   45-IMG_5505    1365x2048  54451.6 ms  kept 310765 edges 6870  59.0s  OK
+[ 41] MALAYSIA               224-IMG_4083   2048x1365  62.7854 ms  kept 310765 edges 20343   4.0s  OK
+[ 42] MALAYSIA               134-IMG_4173   1720x2048  32.9867 ms  kept 392042 edges 10460   3.9s  OK
+[ 43] MALAYSIA               112-IMG_4195   1365x2048  63032.4 ms  kept 310765 edges 5382  67.5s  OK
+[ 44] MALAYSIA               782-IMG_3473   1365x2048  39.8075 ms  kept 310765 edges 24959   4.1s  OK

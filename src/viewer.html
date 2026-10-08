@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>CUDA Gaussian Splat Viewer</title>
+    <style>
+        html, body { margin: 0; height: 100%; background: #121212; overflow: hidden; }
+        #frame { position: fixed; inset: 0; width: 100%; height: 100%; user-select: none; -webkit-user-drag: none; }
+        #label { position: fixed; top: 12px; left: 16px; color: #ddd; font: 14px/1.4 system-ui, sans-serif;
+                 background: rgba(0, 0, 0, 0.55); padding: 4px 10px; border-radius: 4px; pointer-events: none;
+                 white-space: pre; }
+    </style>
+</head>
+<body>
+    <img id="frame" alt="">
+    <div id="label">Loading…</div>
+    <script>
+        // Every frame is rendered by splat_server with CUDA; this page only sends the camera
+        // and shows the JPEG that comes back.
+        // Controls: left drag = orbit, right drag = pan, wheel = zoom, R = back to the photo view,
+        // Space / Shift+Space = next / previous point cloud.
+        const img = document.getElementById('frame');
+        const label = document.getElementById('label');
+
+        let files = [];
+        let current = 0;
+        let info = null;          // reply of /load
+        let target = [0, 0, 1];   // orbit centre
+        let distance = 1, yaw = 0, pitch = 0;
+        let stats = '';
+        let busy = false, dirty = false;
+        let lastFrame = performance.now(), fps = 0;
+
+        // Same axes as the photo: x right, y down, z forward. The camera sits at
+        // target + distance * direction(yaw, pitch); yaw = pitch = 0 is the photo viewpoint.
+        function cameraPosition() {
+            return [target[0] + distance * Math.cos(pitch) * Math.sin(yaw),
+                    target[1] - distance * Math.sin(pitch),
+                    target[2] - distance * Math.cos(pitch) * Math.cos(yaw)];
+        }
+
+        function resetView() {
+            target = [0, 0, info.z_mid];
+            distance = info.z_mid;
+            yaw = pitch = 0;
+            requestFrame();
+        }
+
+        function requestFrame() {
+            if (!info) return;
+            if (busy) { dirty = true; return; }
+            busy = true;
+            dirty = false;
+            const w = Math.min(2560, Math.round(window.innerWidth));
+            const h = Math.min(2560, Math.round(window.innerHeight));
+            const p = cameraPosition();
+            const q = new URLSearchParams({ w, h, px: p[0], py: p[1], pz: p[2],
+                                            tx: target[0], ty: target[1], tz: target[2], fov: info.fov_y });
+            fetch('/frame?' + q)
+                .then(r => {
+                    stats = `CUDA ${r.headers.get('X-Render-Ms')} ms · JPEG ${r.headers.get('X-Encode-Ms')} ms`;
+                    return r.blob();
+                })
+                .then(blob => {
+                    const old = img.src;
+                    img.src = URL.createObjectURL(blob);
+                    if (old) URL.revokeObjectURL(old);
+                    const now = performance.now();
+                    fps = 0.8 * fps + 0.2 * (1000 / (now - lastFrame));
+                    lastFrame = now;
+                    showLabel();
+                })
+                .catch(() => { label.textContent = 'Lost the connection to splat_server'; })
+                .finally(() => {
+                    busy = false;
+                    if (dirty) requestFrame();
+                });
+        }
+
+        function showLabel() {
+            label.textContent = `${files[current]}  (${current + 1}/${files.length})  ·  ` +
+                `${info.count.toLocaleString()} Gaussians\n${stats} · ${fps.toFixed(0)} fps\n` +
+                `drag: orbit · right drag: pan · wheel: zoom · R: reset · Space: next`;
+        }
+
+        function show(index) {
+            current = (index + files.length) % files.length;
+            const name = files[current];
+            label.textContent = `${name}  (${current + 1}/${files.length})  loading…`;
+            fetch('/load?ply=' + encodeURIComponent(name))
+                .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)))
+                .then(j => { info = j; resetView(); })
+                .catch(err => { label.textContent = `Could not load ${name}: ${err}`; });
+        }
+
+        // mouse
+        let drag = null;
+        img.addEventListener('contextmenu', e => e.preventDefault());
+        img.addEventListener('mousedown', e => { drag = { x: e.clientX, y: e.clientY, button: e.button }; });
+        window.addEventListener('mouseup', () => { drag = null; });
+        window.addEventListener('mousemove', e => {
+            if (drag && e.buttons === 0) drag = null;  // the button was released outside the window
+            if (!drag || !info) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            drag.x = e.clientX;
+            drag.y = e.clientY;
+            if (drag.button === 0) {
+                yaw -= dx * 0.005;
+                pitch = Math.max(-1.5, Math.min(1.5, pitch + dy * 0.005));
+            } else {
+                // pan along the camera's right and down axes
+                const k = distance * 2 * Math.tan(info.fov_y * Math.PI / 360) / window.innerHeight;
+                const right = [Math.cos(yaw), 0, Math.sin(yaw)];
+                const down = [Math.sin(pitch) * Math.sin(yaw), Math.cos(pitch), -Math.sin(pitch) * Math.cos(yaw)];
+                for (let i = 0; i < 3; ++i) target[i] -= (right[i] * dx + down[i] * dy) * k;
+            }
+            requestFrame();
+        });
+        img.addEventListener('wheel', e => {
+            e.preventDefault();
+            distance = Math.max(0.05, distance * Math.exp(e.deltaY * 0.001));
+            requestFrame();
+        }, { passive: false });
+
+        window.addEventListener('keydown', e => {
+            if (e.code === 'Space' && files.length) {
+                e.preventDefault();
+                show(current + (e.shiftKey ? -1 : 1));
+            } else if (e.code === 'KeyR' && info) {
+                resetView();
+            }
+        });
+        window.addEventListener('resize', requestFrame);
+
+        if (location.protocol === 'file:') {
+            label.textContent = 'Opened from disk: run "make servecuda" and open http://localhost:8080/';
+        } else {
+            fetch('/list').then(r => r.json()).then(list => {
+                files = list;
+                if (files.length === 0) {
+                    label.textContent = 'No .ply files in data/ply/ (run make run-splat)';
+                    return;
+                }
+                const wanted = new URLSearchParams(location.search).get('ply');
+                show(Math.max(0, files.indexOf(wanted)));
+            });
+        }
+    </script>
+</body>
+</html>

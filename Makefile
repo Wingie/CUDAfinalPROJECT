@@ -79,6 +79,7 @@ INPUT ?= $(DATA_DIR)/Lena.png
 # (sudo apt install libopencv-dev pkg-config) and ONNX Runtime GPU for the depth
 # model (make ort: ONNX Runtime + CUDA 12 / cuDNN 9 libraries, all into lib/ort)
 SPLAT = $(BIN_DIR)/splat$(EXE)
+SPLAT_SERVER = $(BIN_DIR)/splat_server$(EXE)
 ORT_VERSION = 1.30.0
 ORT_URL = https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-linux-x64-gpu_cuda12-$(ORT_VERSION).tgz
 ORT_DIR = $(LIB_DIR)/ort
@@ -94,7 +95,7 @@ MIDAS_MODEL = midas.onnx
 MODEL ?= $(DA2_MODEL)
 MAX_POINTS ?= 500000
 # far/near ratio of the generated scene, and the relative depth jump at which a point counts
-# as sitting on an object edge and is dropped (0 = keep all)
+# as sitting on an object edge and is moved back to the background (0 = off)
 DEPTH_RANGE ?= 10
 EDGE ?= 0.1
 PLY ?= $(DATA_DIR)/ply/$(notdir $(basename $(INPUT))).ply
@@ -109,7 +110,7 @@ override INPUT := $(shell wslpath -u '$(INPUT)')
 endif
 endif
 
-.PHONY: all run run-colour splat ort ort-links model run-splat serve server clean help
+.PHONY: all run run-colour splat splat-server ort ort-links model run-splat servecuda servepy serve server clean help
 
 # Define the default rule
 all: $(ROTATE) $(COLOUR)
@@ -133,16 +134,16 @@ ifeq ($(OS),Windows_NT)
 # make inside WSL in the same folder, passing on command-line variables (INPUT=..., PORT=...)
 WSL_DIR := $(shell echo "$(CURDIR)" | sed -E 's|^([A-Za-z]):|/mnt/\L\1|; s|^/([a-z])/|/mnt/\1/|')
 
-splat ort ort-links model run-splat serve server:
+splat splat-server ort ort-links model run-splat servecuda servepy serve server:
 	MSYS_NO_PATHCONV=1 wsl.exe -d $(WSL_DISTRO) --cd "$(WSL_DIR)" -- make $@ $(MAKEOVERRIDES)
 
 else
 
 splat: $(SPLAT)
 
-$(SPLAT): $(SRC_DIR)/splat.cu $(ORT_LIB)
+$(SPLAT): $(SRC_DIR)/splat.cu $(SRC_DIR)/gaussians.h $(ORT_LIB)
 	mkdir -p $(BIN_DIR)
-	"$(NVCC)" $(NVCCFLAGS) -diag-suppress 611 -I$(ORT_DIR)/include $< -o $@ \
+	"$(NVCC)" $(NVCCFLAGS) -diag-suppress 611 -I$(SRC_DIR) -I$(ORT_DIR)/include $< -o $@ \
 	    $$(pkg-config opencv4 --cflags --libs) -lcudart -L$(ORT_DIR)/lib -lonnxruntime \
 	    -Xlinker --disable-new-dtags -Xlinker -rpath -Xlinker $(abspath $(ORT_DIR)/lib)
 
@@ -181,12 +182,24 @@ run-splat: $(SPLAT) $(MODEL)
 	mkdir -p $(dir $(PLY))
 	./$(SPLAT) $(INPUT) $(PLY) $(MODEL) $(MAX_POINTS) $(DEPTH_RANGE) $(EDGE)
 
-# View the point clouds: serves the repo root so src/index.html can list data/ply/ (Space = next)
-serve:
+# The CUDA Gaussian splat renderer and web server (src/splat_server.cu): every frame
+# is rasterised on the GPU and sent to the browser as a JPEG (nvJPEG)
+splat-server: $(SPLAT_SERVER)
+
+$(SPLAT_SERVER): $(SRC_DIR)/splat_server.cu $(SRC_DIR)/gaussians.h
+	mkdir -p $(BIN_DIR)
+	"$(NVCC)" $(NVCCFLAGS) -I$(SRC_DIR) $< -o $@ -lnvjpeg
+
+# View the Gaussians rendered by CUDA: open http://localhost:$(PORT)/
+servecuda: $(SPLAT_SERVER)
+	./$(SPLAT_SERVER) $(PORT)
+
+# The older three.js point viewer, served by python: open http://localhost:$(PORT)/src/index.html
+servepy:
 	@echo "Open http://localhost:$(PORT)/src/index.html  (Ctrl+C stops the server)"
 	python3 -m http.server $(PORT)
 
-server: serve
+serve server: servecuda
 
 endif
 
@@ -205,7 +218,8 @@ help:
 	@echo "  make model  - Download the depth model MODEL (default $(DA2_MODEL))."
 	@echo "  make run-splat INPUT=<photo> - Build splat, then turn INPUT into data/ply/<name>.ply."
 	@echo "                 Also MODEL, DEPTH_RANGE, EDGE, MAX_POINTS, PLY."
-	@echo "  make server - View the point clouds at http://localhost:$(PORT)/src/index.html (alias: serve)"
+	@echo "  make servecuda - Render the Gaussians with CUDA, view at http://localhost:$(PORT)/ (alias: server)"
+	@echo "  make servepy - Point viewer (three.js, python server) at http://localhost:$(PORT)/src/index.html"
 	@echo "  make clean  - Clean up the build files."
 	@echo "  make help   - Display this help message."
 	@echo "Variables: SM=86 (GPU arch), CCBIN=<dir of cl.exe> (Windows), CUDA_PATH (Linux)."

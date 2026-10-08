@@ -1,0 +1,7 @@
+[0;93m2026-10-08 12:33:46.959246167 [W:onnxruntime:, session_state.cc:1397 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.[m
+[0;93m2026-10-08 12:33:46.960349543 [W:onnxruntime:, session_state.cc:1399 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.[m
+Depth model: depth_anything_v2_small.onnx, ONNX Runtime 1.30.0 on CUDA, input 518x784
+Depth inference (first run): 1137.33 ms
+Depth inference (warm): 38.8694 ms
+Image 4000x6000, stride 7, depth range 1..10, kept 477508 of 490776 points (13268 on depth edges)
+Saving 3D Splat to data/ply/charlize__IMG_4391.ply...
