@@ -4,4 +4,11 @@
 *.ptx
 *.cubin
 *.fatbin
-data/
+data/charlize/source
+data/*.zip
+midas.onnx
+midas.onnx.part
+data/ply/
+bin/splat
+lib/ort
+lib/ort.tmp

@@ -92,36 +92,60 @@ int main(int argc, char *argv[])
         Npp8u *pTmp = nppiMalloc_8u_C3(width, height, &step3);
         Npp8u *pGray = nppiMalloc_8u_C1(width, height, &step1);
         Npp8u *pMask = nppiMalloc_8u_C1(width, height, &step1);
+        Npp8u *pHue = nppiMalloc_8u_C1(width, height, &step1);
+        Npp8u *pSatMask = nppiMalloc_8u_C1(width, height, &step1);
+        Npp8u *pWrap = nppiMalloc_8u_C1(width, height, &step1);
         checkCudaErrors(cudaMemcpy2D(pRGB, step3, pHostRGB, hostStep, hostStep, height, cudaMemcpyHostToDevice));
 
-        // 3\  to HSV on the GPU, then count hues on the host
-        NPP_CHECK_NPP(nppiRGBToHSV_8u_C3R_Ctx(pRGB, step3, pHSV, step3, oSize, ctx));
-        std::vector<Npp8u> hsv((size_t)width * height * 3);
-        checkCudaErrors(cudaMemcpy2D(hsv.data(), hostStep, pHSV, step3, hostStep, height, cudaMemcpyDeviceToHost));
-
-        int histogram[256] = {0};
-        for (size_t i = 0; i < hsv.size(); i += 3)
+        // scratch for the histogram and the pixel counts (same buffer, used one at a time)
+        size_t histBufSize, countBufSize;
+        NPP_CHECK_NPP(nppiHistogramEvenGetBufferSize_8u_C1R_Ctx(oSize, 257, &histBufSize, ctx));
+        NPP_CHECK_NPP(nppiCountInRangeGetBufferHostSize_8u_C1R_Ctx(oSize, &countBufSize, ctx));
+        Npp8u *pScratch;
+        int *pHistogram, *pCount;
+        checkCudaErrors(cudaMalloc(&pScratch, std::max(histBufSize, countBufSize)));
+        checkCudaErrors(cudaMalloc(&pHistogram, 256 * sizeof(int)));
+        checkCudaErrors(cudaMalloc(&pCount, sizeof(int)));
+        auto countInRange = [&](const Npp8u *pSrc, Npp8u lo, Npp8u hi)
         {
-            if (hsv[i + 1] >= MIN_SATURATION)
-            {
-                histogram[hsv[i]]++;
-            }
-        }
+            int count;
+            NPP_CHECK_NPP(nppiCountInRange_8u_C1R_Ctx(pSrc, step1, oSize, pCount, lo, hi, pScratch, ctx));
+            checkCudaErrors(cudaMemcpy(&count, pCount, sizeof(int), cudaMemcpyDeviceToHost));
+            return count;
+        };
+
+        // 3\ to HSV, then a 256-bin hue histogram of the saturated pixels, all on the GPU
+        NPP_CHECK_NPP(nppiRGBToHSV_8u_C3R_Ctx(pRGB, step3, pHSV, step3, oSize, ctx));
+        NPP_CHECK_NPP(nppiCopy_8u_C3C1R_Ctx(pHSV, step3, pHue, step1, oSize, ctx));
+        NPP_CHECK_NPP(nppiCopy_8u_C3C1R_Ctx(pHSV + 1, step3, pGray, step1, oSize, ctx));
+        NPP_CHECK_NPP(nppiCompareC_8u_C1R_Ctx(pGray, step1, MIN_SATURATION, pSatMask, step1, oSize,
+                                              NPP_CMP_GREATER_EQ, ctx));
+        // unsaturated pixels get hue 0, and are taken back out of bin 0 below
+        NPP_CHECK_NPP(nppiAnd_8u_C1R_Ctx(pHue, step1, pSatMask, step1, pGray, step1, oSize, ctx));
+        NPP_CHECK_NPP(nppiHistogramEven_8u_C1R_Ctx(pGray, step1, oSize, pHistogram, 257, 0, 256, pScratch, ctx));
+        int histogram[256];
+        checkCudaErrors(cudaMemcpy(histogram, pHistogram, sizeof(histogram), cudaMemcpyDeviceToHost));
+        histogram[0] -= countInRange(pSatMask, 0, 0);
         int commonHue = (int)(std::max_element(histogram, histogram + 256) - histogram);
 
-        // 4\ mask 255 where a pixel's hue is close to the common hue (hue wraps around)
-        std::vector<Npp8u> mask((size_t)width * height);
-        size_t keptPixels = 0;
-        for (size_t p = 0; p < mask.size(); ++p)
+        // 4\ mask 255 where a pixel's hue is close to the common hue (hue wraps around,
+        //    so a distance d >= 256 - range is close too), on the GPU
+        NPP_CHECK_NPP(nppiAbsDiffC_8u_C1R_Ctx(pHue, step1, pGray, step1, oSize, (Npp8u)commonHue, ctx));
+        NPP_CHECK_NPP(nppiCompareC_8u_C1R_Ctx(pGray, step1, (Npp8u)std::min(hueRange, 255), pMask, step1, oSize,
+                                              NPP_CMP_LESS_EQ, ctx));
+        if (hueRange > 0)
         {
-            int distance = abs(hsv[3 * p] - commonHue);
-            distance = std::min(distance, 256 - distance);
-            bool common = distance <= hueRange && hsv[3 * p + 1] >= MIN_SATURATION;
-            bool keep = common != invert;
-            mask[p] = keep ? 255 : 0;
-            keptPixels += keep;
+            NPP_CHECK_NPP(nppiCompareC_8u_C1R_Ctx(pGray, step1, (Npp8u)std::max(256 - hueRange, 0), pWrap, step1,
+                                                  oSize, NPP_CMP_GREATER_EQ, ctx));
+            NPP_CHECK_NPP(nppiOr_8u_C1IR_Ctx(pWrap, step1, pMask, step1, oSize, ctx));
         }
-        checkCudaErrors(cudaMemcpy2D(pMask, step1, mask.data(), width, width, height, cudaMemcpyHostToDevice));
+        NPP_CHECK_NPP(nppiAnd_8u_C1IR_Ctx(pSatMask, step1, pMask, step1, oSize, ctx));
+        if (invert)
+        {
+            NPP_CHECK_NPP(nppiNot_8u_C1IR_Ctx(pMask, step1, oSize, ctx));
+        }
+        size_t keptPixels = countInRange(pMask, 255, 255);
+        size_t numPixels = (size_t)width * height;
 
         // 5\ back to 3 identical channels, then blur repeatedly
         NPP_CHECK_NPP(nppiRGBToGray_8u_C3C1R_Ctx(pRGB, step3, pGray, step1, oSize, ctx));
@@ -144,13 +168,16 @@ int main(int argc, char *argv[])
         }
 
         std::cout << "Most common hue: " << commonHue * 360 / 256 << " degrees, kept "
-                  << 100.0 * keptPixels / mask.size() << "% of the pixels in colour" << std::endl;
+                  << 100.0 * keptPixels / numPixels << "% of the pixels in colour" << std::endl;
         std::cout << "Saved image: " << sResultFilename << std::endl;
 
-        for (Npp8u *p : {pRGB, pHSV, pOut, pTmp, pGray, pMask})
+        for (Npp8u *p : {pRGB, pHSV, pOut, pTmp, pGray, pMask, pHue, pSatMask, pWrap})
         {
             nppiFree(p);
         }
+        cudaFree(pScratch);
+        cudaFree(pHistogram);
+        cudaFree(pCount);
         stbi_image_free(pHostRGB);
         return EXIT_SUCCESS;
     }

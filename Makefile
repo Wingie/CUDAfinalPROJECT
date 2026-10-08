@@ -67,7 +67,7 @@ NVCCFLAGS = -std=c++17 -arch=sm_$(SM) -I$(INCLUDE_DIR)
 ifneq ($(CCBIN),)
     NVCCFLAGS += -ccbin "$(CCBIN)"
 endif
-LDFLAGS = -lcudart -lnppc -lnppisu -lnppig -lnppidei -lnppicc -lnppif
+LDFLAGS = -lcudart -lnppc -lnppisu -lnppig -lnppidei -lnppicc -lnppif -lnppial -lnppist -lnppitc
 
 HEADERS = $(wildcard $(INCLUDE_DIR)/*.h)
 ROTATE = $(BIN_DIR)/imageRotationNPP$(EXE)
@@ -75,7 +75,22 @@ COLOUR = $(BIN_DIR)/imageColourNPP$(EXE)
 
 INPUT ?= $(DATA_DIR)/Lena.png
 
-.PHONY: all run run-colour clean help
+# 2D photo -> 3D point cloud, built on Linux/WSL only. Needs OpenCV for image I/O
+# (sudo apt install libopencv-dev pkg-config) and ONNX Runtime GPU for the depth
+# model (make ort: ONNX Runtime + CUDA 12 / cuDNN 9 libraries, all into lib/ort)
+SPLAT = $(BIN_DIR)/splat$(EXE)
+ORT_VERSION = 1.30.0
+ORT_URL = https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-linux-x64-gpu_cuda12-$(ORT_VERSION).tgz
+ORT_DIR = $(LIB_DIR)/ort
+ORT_LIB = $(ORT_DIR)/lib/libonnxruntime.so
+CUDA12_WHEELS = nvidia-cudnn-cu12==9.* nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cufft-cu12 \
+                nvidia-curand-cu12 nvidia-cuda-nvrtc-cu12
+MIDAS_URL = https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx
+MIDAS_MODEL ?= midas.onnx
+PLY ?= $(DATA_DIR)/ply/$(notdir $(basename $(INPUT))).ply
+PORT ?= 8080
+
+.PHONY: all run run-colour splat ort ort-links model run-splat serve clean help
 
 # Define the default rule
 all: $(ROTATE) $(COLOUR)
@@ -93,6 +108,50 @@ run: $(ROTATE)
 run-colour: $(COLOUR)
 	./$(COLOUR) --input=$(INPUT) --output=$(basename $(INPUT))_colour.jpg
 
+splat: $(SPLAT)
+
+$(SPLAT): $(SRC_DIR)/splat.cu $(ORT_LIB)
+	mkdir -p $(BIN_DIR)
+	"$(NVCC)" $(NVCCFLAGS) -diag-suppress 611 -I$(ORT_DIR)/include $< -o $@ \
+	    $$(pkg-config opencv4 --cflags --libs) -lcudart -L$(ORT_DIR)/lib -lonnxruntime \
+	    -Xlinker --disable-new-dtags -Xlinker -rpath -Xlinker $(abspath $(ORT_DIR)/lib)
+
+# ONNX Runtime GPU plus the CUDA 12 and cuDNN 9 libraries its CUDA provider loads.
+# Everything goes into one folder so the provider finds them next to itself.
+ort: $(ORT_LIB)
+
+$(ORT_LIB):
+	rm -rf $(ORT_DIR) $(ORT_DIR).tmp && mkdir -p $(ORT_DIR).tmp/wheels
+	curl -L --fail $(ORT_URL) | tar -xz -C $(ORT_DIR).tmp
+	python3 -m pip download --quiet --no-deps --only-binary=:all: -d $(ORT_DIR).tmp/wheels $(CUDA12_WHEELS)
+	for w in $(ORT_DIR).tmp/wheels/*.whl; do python3 -m zipfile -e "$$w" $(ORT_DIR).tmp/cuda; done
+	mv $(ORT_DIR).tmp/onnxruntime-linux-x64-gpu* $(ORT_DIR)
+	find $(ORT_DIR).tmp/cuda -name '*.so*' -exec cp {} $(ORT_DIR)/lib/ \;
+	rm -rf $(ORT_DIR).tmp
+	$(MAKE) ort-links
+
+# the wheels ship only libX.so.N, but ONNX Runtime also dlopens plain libX.so
+ort-links:
+	cd $(ORT_DIR)/lib && for f in libcu*.so.* libnv*.so.*; do \
+	    [ -e "$${f%%.so.*}.so" ] || ln -s "$$f" "$${f%%.so.*}.so"; done
+
+# Download the MiDaS depth model (once); .part keeps a failed download from looking finished
+model: $(MIDAS_MODEL)
+
+$(MIDAS_MODEL):
+	curl -L --fail -o $@.part $(MIDAS_URL)
+	mv $@.part $@
+
+# Build and download if needed, then turn INPUT into PLY (default data/ply/<input name>.ply)
+run-splat: $(SPLAT) $(MIDAS_MODEL)
+	mkdir -p $(dir $(PLY))
+	./$(SPLAT) $(INPUT) $(PLY) $(MIDAS_MODEL)
+
+# View the point clouds: serves the repo root so src/index.html can list data/ply/ (Space = next)
+serve:
+	@echo "Open http://localhost:$(PORT)/src/index.html"
+	python3 -m http.server $(PORT)
+
 # Clean up
 clean:
 	rm -rf $(BIN_DIR)/*
@@ -103,6 +162,10 @@ help:
 	@echo "  make        - Build the project."
 	@echo "  make run    - Build, then rotate INPUT (default $(INPUT))."
 	@echo "  make run-colour - Build, then colour-splash INPUT."
+	@echo "  make ort    - (Linux/WSL) Download ONNX Runtime GPU + CUDA 12/cuDNN 9 libs to $(ORT_DIR)."
+	@echo "  make model  - Download the MiDaS depth model to $(MIDAS_MODEL)."
+	@echo "  make run-splat - (Linux/WSL) Build splat, then turn INPUT into $(PLY)."
+	@echo "  make serve  - View the point cloud at http://localhost:$(PORT)/src/index.html"
 	@echo "  make clean  - Clean up the build files."
 	@echo "  make help   - Display this help message."
 	@echo "Variables: SM=86 (GPU arch), CCBIN=<dir of cl.exe> (Windows), CUDA_PATH (Linux)."
