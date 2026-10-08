@@ -12,3 +12,4 @@ data/ply/
 bin/splat
 lib/ort
 lib/ort.tmp
+*.onnx
